@@ -1,6 +1,7 @@
 import collections
 import concurrent.futures
 import regex as re
+import json
 from tqdm import tqdm
 from typing import TypeAlias
 
@@ -13,6 +14,7 @@ MergesDict: TypeAlias = list[tuple[int, ...]]
 TokenID: TypeAlias = int
 BASE_VOCAB_SIZE = 256
 PAT = r"""'(?:[sdmt]|ll|ve|re)| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+"""
+_PAT = re.compile(PAT)
 txt_file = "/Users/athekunal/Desktop/Stanford-cs336/Stanford-cs336-learning/stanford-cs336/data/TinyStoriesV2-GPT4-valid.txt"
 
 
@@ -22,9 +24,8 @@ def convert_to_bytes(
     bytes_dict: collections.defaultdict[BytesTuple, BytesCount] = (
         collections.defaultdict(int)
     )
-    for match in list(re.finditer(PAT, text)):
-        bytes_key = tuple(list(match.group().encode("utf-8")))
-        # group by two successive bytes and make the count, to reduce one less iteration
+    for match in re.finditer(_PAT, text):
+        bytes_key = tuple(match.group().encode("utf-8"))
         bytes_dict[bytes_key] += 1
     return bytes_dict
 
@@ -77,24 +78,24 @@ def get_new_vocab_dict(
             successive_dict[(k[i], k[i + 1])] += v
 
     top1 = max(successive_dict.items(), key=lambda item: item[1])
-    combined_vocab_dict: VocabDict = collections.defaultdict()
+    combined_vocab_dict: VocabDict = collections.defaultdict(int)
     for k, v in curr_vocab_dict.items():
         new_key = replace_all_subsequences(k, top1[0], curr_max_vocab=curr_max_vocab)
-        combined_vocab_dict[new_key] = v
+        combined_vocab_dict[new_key] += v
     return combined_vocab_dict, top1[0]
 
 
 def unroll_merges(
-    vocab_dict: collections.defaultdict[TokenID, BytesTuple],
+    curr_vocab_dict: collections.defaultdict[TokenID, BytesTuple],
     curr_merges: tuple[int, ...],
     initial_vocab_len: int,
 ) -> tuple[int, ...]:
     actual_token_ids: list[int] = []
 
     for cm in curr_merges:
-        assert cm in vocab_dict, f"Could not find the token id {cm}"
-        if cm >= initial_vocab_len - 1:
-            token_ids = vocab_dict[cm]
+        assert cm in curr_vocab_dict, f"Could not find the token id {cm}"
+        if cm >= initial_vocab_len:
+            token_ids = curr_vocab_dict[cm]
             actual_token_ids.extend(token_ids)
         else:
             actual_token_ids.append(cm)
@@ -111,8 +112,13 @@ def train_bpe(
     initial_vocab = list(range(BASE_VOCAB_SIZE)) + [
         BASE_VOCAB_SIZE + i for i in range(len(special_tokens))
     ]
+    initial_vocab_size = BASE_VOCAB_SIZE + len(special_tokens)
+    if vocab_size < initial_vocab_size:
+        raise ValueError(
+            f"vocab_size={vocab_size} is too small; must be at least {initial_vocab_size}"
+        )
     vocab_dict: collections.defaultdict[TokenID, BytesTuple] = collections.defaultdict(
-        BytesTuple
+        tuple
     )
     for iv in initial_vocab:
         vocab_dict[iv] = (iv,)
@@ -134,20 +140,24 @@ def train_bpe(
             for key, val in res.items():
                 all_bytes_dict[key] += val
     merges: list[tuple[int, ...]] = []
-    for merge in tqdm(range(num_merges)):
+    for merge in tqdm(range(num_merges), desc=f"Running for merges {num_merges}"):
         curr_max_vocab = BASE_VOCAB_SIZE + len(special_tokens) + merge
         all_bytes_dict, curr_merges = get_new_vocab_dict(
             all_bytes_dict, curr_max_vocab=curr_max_vocab
         )
         vocab_dict[curr_max_vocab] = unroll_merges(
-            vocab_dict, curr_merges, len(initial_vocab)
+            vocab_dict, curr_merges, initial_vocab_size
         )
         merges.append(curr_merges)
 
     return vocab_dict, merges, special_tokens_map
 
 
+def save_dict_to_json(data: dict, file_path: str, indent: int = 4) -> None:
+    with open(file_path, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=indent)
+
+
 if __name__ == "__main__":
     vocab_dict, merges, special_tokens_map = train_bpe(txt_file, 500, ["<|endoftext|>"])
-    print(vocab_dict)
-    print(merges)
+    save_dict_to_json(vocab_dict, "temp.json", indent=1)
