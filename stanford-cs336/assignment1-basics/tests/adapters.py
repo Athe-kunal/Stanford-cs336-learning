@@ -202,7 +202,24 @@ def run_rope(
     Returns:
         Float[Tensor, " ... sequence_length d_k"]: Tensor with RoPEd input.
     """
-    raise NotImplementedError
+    device = in_query_or_key.device
+    dtype = in_query_or_key.dtype
+    inv_freq = 1 / (
+        theta
+        ** ((2 * torch.arange(1, d_k // 2 + 1, 1, device=device, dtype=dtype)) / d_k)
+    )
+    m_theta = token_positions.unsqueeze(-1) * inv_freq
+    m_theta = torch.repeat_interleave(m_theta, repeats=2, dim=-1)
+    m_theta_cos = torch.cos(m_theta).float()
+    m_theta_sin = torch.sin(m_theta).float()
+    in_query_key_alt = torch.stack(
+        (-in_query_or_key[..., 0::2], in_query_or_key[..., 1::2]), dim=-1
+    ).flatten(start_dim=-2, end_dim=-1)
+    out = (in_query_or_key * m_theta_cos + in_query_key_alt * m_theta_sin).to(
+        dtype=dtype
+    )
+    print(out)
+    return out
 
 
 def run_transformer_block(
