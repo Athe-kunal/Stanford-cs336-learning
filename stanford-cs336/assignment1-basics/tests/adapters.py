@@ -205,20 +205,21 @@ def run_rope(
     device = in_query_or_key.device
     dtype = in_query_or_key.dtype
     inv_freq = 1 / (
-        theta
-        ** ((2 * torch.arange(1, d_k // 2 + 1, 1, device=device, dtype=dtype)) / d_k)
-    )
+        theta ** ((torch.arange(0, d_k, 2, device=device, dtype=dtype)) / d_k)
+    )  # (d/2,1)
+    # seq_idx = torch.arange(
+    #     max_seq_len, dtype=dtype, device=device
+    # )  # (max_seq_len,1), also it can be token_positions
     m_theta = token_positions.unsqueeze(-1) * inv_freq
-    m_theta = torch.repeat_interleave(m_theta, repeats=2, dim=-1)
-    m_theta_cos = torch.cos(m_theta).float()
-    m_theta_sin = torch.sin(m_theta).float()
+    m_theta_cos = torch.repeat_interleave(torch.cos(m_theta).to(dtype=dtype), 2, -1)
+    m_theta_sin = torch.repeat_interleave(torch.sin(m_theta).to(dtype=dtype), 2, -1)
     in_query_key_alt = torch.stack(
-        (-in_query_or_key[..., 0::2], in_query_or_key[..., 1::2]), dim=-1
+        (-in_query_or_key[..., 1::2], in_query_or_key[..., 0::2]), dim=-1
     ).flatten(start_dim=-2, end_dim=-1)
     out = (in_query_or_key * m_theta_cos + in_query_key_alt * m_theta_sin).to(
         dtype=dtype
     )
-    print(out)
+    print(out.shape)
     return out
 
 

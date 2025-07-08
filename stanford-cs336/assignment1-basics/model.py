@@ -105,4 +105,40 @@ def run_silu(in_features: torch.Tensor) -> torch.Tensor:
     return in_features * (1 / (1 + torch.exp(-in_features)))
 
 
-# class RotaryPositionalEmbedding(nn.Module):
+class RotaryPositionalEmbedding(nn.Module):
+    def __init__(
+        self, theta: float, d_k: int, max_seq_len: int, device: str = None
+    ) -> None:
+        super().__init__()
+        self.theta = theta
+        assert d_k % 2 == 0, f"d_k should be even, but got {d_k}"
+        self.d_k = d_k
+        self.max_seq_len = max_seq_len
+        self.device = device or ("cuda" if torch.cuda.is_available() else "cpu")
+        self._build_cache()
+
+    def reset_parameters(self):
+        self._build_cache()
+
+    def _build_cache(self):
+        inv_freq = 1 / (
+            self.theta ** (torch.arange(0, self.d_k, 2, device=self.device) / self.d_k)
+        )
+        self.register_buffer(
+            "inv_freq", inv_freq, persistent=False
+        )  # don't want to be part of the module state_dict
+        seq_idx = torch.arange(self.max_seq_len)
+        m_theta = seq_idx.unsqueeze(-1) * inv_freq
+        m_theta_cos = torch.repeat_interleave(torch.cos(m_theta), repeats=2, dim=-1)
+        m_theta_sin = torch.repeat_interleave(torch.sin(m_theta), repeats=2, dim=-1)
+        self.register_buffer("m_theta_cos", m_theta_cos, persistent=False)
+        self.register_buffer("m_theta_sin", m_theta_sin, persistent=False)
+
+    def forward(self, x: torch.Tensor, input_token_positions: torch.Tensor):
+        rope_cache_cos = self.m_theta_cos[input_token_positions]
+        rope_cache_sin = self.m_theta_sin[input_token_positions]
+        x_alt = torch.stack((-x[..., 1::2], x[..., 0::2]), dim=-1).flatten(
+            start_dim=-2, end_dim=-1
+        )
+        out = (x * rope_cache_cos + x_alt * rope_cache_sin).to(x.dtype)
+        return out
