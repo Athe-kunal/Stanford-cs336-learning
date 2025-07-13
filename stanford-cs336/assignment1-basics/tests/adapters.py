@@ -88,6 +88,9 @@ def run_swiglu(
     return w2_out
 
 
+import math
+
+
 def run_scaled_dot_product_attention(
     Q: Float[Tensor, " ... queries d_k"],
     K: Float[Tensor, " ... keys d_k"],
@@ -106,7 +109,10 @@ def run_scaled_dot_product_attention(
     Returns:
         Float[Tensor, " ... queries d_v"]: Output of SDPA
     """
-    raise NotImplementedError
+    in_features = (Q @ torch.transpose(K, -1, -2)) / math.sqrt(Q.shape[-1])
+    if mask is not None:
+        in_features = torch.where(mask == 1, in_features, -1e9)
+    return run_softmax(in_features=in_features, dim=-1) @ V
 
 
 def run_multihead_self_attention(
@@ -140,7 +146,9 @@ def run_multihead_self_attention(
         Float[Tensor, " ... sequence_length d_out"]: Tensor with the output of running your optimized, batched multi-headed attention
         implementation with the given QKV projection weights and input features.
     """
-    raise NotImplementedError
+    Q = in_features @ q_proj_weight  # .. seq_len,
+    K = in_features @ k_proj_weight
+    V = in_features @ v_proj_weight
 
 
 def run_multihead_self_attention_with_rope(
@@ -456,7 +464,9 @@ def run_softmax(in_features: Float[Tensor, " ..."], dim: int) -> Float[Tensor, "
         Float[Tensor, "..."]: Tensor of with the same shape as `in_features` with the output of
         softmax normalizing the specified `dim`.
     """
-    raise NotImplementedError
+    max_val = torch.max(in_features, dim=dim, keepdim=True).values
+    stable_in_features = torch.exp(in_features - max_val)
+    return stable_in_features / (stable_in_features).sum(dim=dim, keepdim=True)
 
 
 def run_cross_entropy(
