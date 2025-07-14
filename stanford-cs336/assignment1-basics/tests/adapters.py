@@ -109,10 +109,12 @@ def run_scaled_dot_product_attention(
     Returns:
         Float[Tensor, " ... queries d_v"]: Output of SDPA
     """
-    in_features = (Q @ torch.transpose(K, -1, -2)) / math.sqrt(Q.shape[-1])
+    in_features = (Q @ torch.transpose(K, -1, -2)) / math.sqrt(
+        Q.shape[-1]
+    )  # [...,head, seq_len,seq_len]
     if mask is not None:
         in_features = torch.where(mask == 1, in_features, -1e9)
-    return run_softmax(in_features=in_features, dim=-1) @ V
+    return run_softmax(in_features=in_features, dim=-1) @ V  # [...,head, seq_len, d_k]
 
 
 def run_multihead_self_attention(
@@ -146,9 +148,34 @@ def run_multihead_self_attention(
         Float[Tensor, " ... sequence_length d_out"]: Tensor with the output of running your optimized, batched multi-headed attention
         implementation with the given QKV projection weights and input features.
     """
-    Q = in_features @ q_proj_weight  # .. seq_len,
-    K = in_features @ k_proj_weight
-    V = in_features @ v_proj_weight
+    assert d_model % num_heads == 0
+    d_in = in_features.shape[-1]
+    d_k = d_model // num_heads
+    seq_len = in_features.shape[-2]
+    Q = torch.einsum(
+        "... sd,hkd->...hsk",  # along the head it is parallel, not sequence length. Each head processes the sequence length separately
+        [in_features, q_proj_weight.reshape((num_heads, d_k, d_in))],
+    )
+    K = torch.einsum(
+        "... sd,hkd->...hsk",
+        [in_features, k_proj_weight.reshape((num_heads, d_k, d_in))],
+    )
+    V = torch.einsum(
+        "... sd,hkd->...hsk",
+        [in_features, v_proj_weight.reshape((num_heads, d_k, d_in))],
+    )
+    mask = torch.tril(torch.ones(num_heads, seq_len, seq_len))
+    attention_out = (  # [...,head, seq_len, d_k]
+        run_scaled_dot_product_attention(Q, K, V, mask=mask)
+        .transpose(-3, -2)  # [...,seq_len,head,d_k]
+        .contiguous()
+    )  # num_heads*d_k = d_model
+    attention_out = attention_out.view(
+        *attention_out.shape[:-3], seq_len, num_heads * d_k
+    )
+    # o_proj_weight -> [d_k,d_model]
+    out = attention_out @ o_proj_weight
+    return out
 
 
 def run_multihead_self_attention_with_rope(
@@ -188,7 +215,48 @@ def run_multihead_self_attention_with_rope(
         Float[Tensor, " ... sequence_length d_out"]: Tensor with the output of running your optimized, batched multi-headed attention
         implementation with the given QKV projection weights and input features.
     """
-    raise NotImplementedError
+    assert d_model % num_heads == 0
+    d_in = in_features.shape[-1]
+    d_k = d_model // num_heads
+    seq_len = in_features.shape[-2]
+    Q = run_rope(
+        d_k=d_k,
+        theta=theta,
+        max_seq_len=max_seq_len,
+        in_query_or_key=torch.einsum(
+            "... sd,hkd->...hsk",  # along the head it is parallel, not sequence length. Each head processes the sequence length separately
+            [in_features, q_proj_weight.reshape((num_heads, d_k, d_in))],
+        ),
+        token_positions=token_positions,
+    )
+    K = run_rope(
+        theta=theta,
+        d_k=d_k,
+        max_seq_len=max_seq_len,
+        in_query_or_key=torch.einsum(
+            "... sd,hkd->...hsk",
+            [in_features, k_proj_weight.reshape((num_heads, d_k, d_in))],
+        ),
+        token_positions=token_positions,
+    )
+    V = torch.einsum(
+        "... sd,hkd->...hsk",
+        [in_features, v_proj_weight.reshape((num_heads, d_k, d_in))],
+    )
+    mask = torch.tril(
+        torch.ones(num_heads, seq_len, seq_len, device=in_features.device)
+    )
+    attention_out = (  # [...,head, seq_len, d_k]
+        run_scaled_dot_product_attention(Q, K, V, mask=mask)
+        .transpose(-3, -2)  # [...,seq_len,head,d_k]
+        .contiguous()
+    )  # num_heads*d_k = d_model
+    attention_out = attention_out.view(
+        *attention_out.shape[:-3], seq_len, num_heads * d_k
+    )
+    # o_proj_weight -> [d_k,d_model]
+    out = attention_out @ o_proj_weight
+    return out
 
 
 def run_rope(
